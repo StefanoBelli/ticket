@@ -1,0 +1,547 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <errno.h>
+#include <time.h>
+#include <signal.h>
+#include <limits.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <arpa/inet.h>
+
+#include "thrmgmt.h"
+#include "malloc_utils.h"
+
+#ifndef DATETIME_FORMAT
+#define DATETIME_FORMAT "%Y/%M/%d %H:%m:%S"
+#endif
+
+#ifndef DEFAULT_PORT
+#define DEFAULT_PORT 8123
+#endif
+
+#ifndef DEFAULT_THREADS
+#define DEFAULT_THREADS 1024
+#endif
+
+#ifndef DEFAULT_RCVTO
+#define DEFAULT_RCVTO 3
+#endif
+
+#define thrmgmt_strerror_loge_exit(r) \
+{ \
+	if(r != THRMGMT_OK) { \
+		char buf[256]; \
+		thrmgmt_strerror(r, buf, 256); \
+		loge(buf); \
+		exit(EXIT_FAILURE); \
+	} \
+}
+
+#define strerror_log(msg) \
+{ \
+	char buf[256] = { 0 }; \
+	snprintf(buf, 256, "%s: %s", msg, strerror(errno)); \
+	loge(buf); \
+}
+
+#define stoull_exit(a, s) \
+{ \
+	int err; \
+	if((err = stoull(a, s))) { \
+		printf("%s: not a valid integer or of/uf occoured\n", \
+				a); \
+		exit(EXIT_FAILURE); \
+	} \
+}
+
+#define value_check(target_idx, cur_idx, opt) \
+{ \
+	target_idx = cur_idx + 1; \
+	if(target_idx == argc) { \
+		printf("%s: missing value\n", opt); \
+		print_usage_exit(argv[0]); \
+	} \
+}
+
+#define get_ullong_value_for_option(arg_array, out_value_ptr, arg_cur_idx) \
+{ \
+	int next_idx; \
+	value_check(next_idx, i, argv[i]); \
+	stoull_exit(argv[next_idx], out_value_ptr); \
+	++arg_cur_idx; \
+}
+
+#define arg(a, s, l) (strcmp(a, s) == 0 || strcmp(a, l) == 0)
+
+#define log(msg) (basic_log("LOG", msg))
+#define loge(msg) (basic_log("ERROR", msg))
+#define VERBOSE if(__verbose__)
+
+
+//typedefs and prototypes
+
+typedef unsigned long long ulong64;
+typedef unsigned int uint32;
+typedef unsigned char ubyte;
+typedef unsigned short ushort16;
+typedef long long int64;
+typedef char* (*svcop_handler_fpt)(const char*, const char*);
+
+typedef struct {
+	int x;
+	int y;
+} pair;
+
+typedef struct {
+	char* name;
+	ubyte has_arg;
+	svcop_handler_fpt handler;
+	uint32 len;
+} svcop;
+
+void request_handler(void*);
+char* op_get_available_seats(const char*, const char*);
+char* op_book_seats(const char*, const char*);
+char* op_revoke_booking(const char*, const char*);
+
+//global variables
+ubyte **free_seats = NULL;
+ubyte __verbose__ = 0;
+uint32 rows = 0;
+uint32 pols = 0;
+uint32 n_tickets = 0;
+uint32 n_threads = DEFAULT_THREADS;
+uint32 rcvtos = DEFAULT_RCVTO;
+uint32 rcvmaxbuf = 0;
+int listen_sd;
+
+#define NOPS 3
+const svcop g_op_listing[NOPS] = {
+	{ "GetAvailableSeats", 0, (svcop_handler_fpt) op_get_available_seats, 17 },
+	{ "BookSeats", 1, op_book_seats, 9 },
+	{ "RevokeBooking", 1, op_revoke_booking, 13 }
+};
+
+// program aux functions
+
+//int stoull(__in const char*, __out ulong64*);
+// returns 0 on success, 1 on failure
+int stoull(const char* s, ulong64* res) {
+	char* end = NULL;
+	*res = strtoull(s, &end, 10);
+	return *end != 0 || errno;
+}
+
+void basic_log(const char* type, const char* msg) {
+	char timebuf[256] = { 0 };
+	time_t t = time(NULL);
+	struct tm *tm = localtime(&t);
+
+	if(tm == NULL) {
+		snprintf(timebuf, 256, "localtime: %s", strerror(errno));
+	} else {
+		if(strftime(timebuf, sizeof(timebuf), DATETIME_FORMAT, tm) == 0)
+			snprintf(timebuf, 256, "strftime: %s", strerror(errno));
+	}
+
+	FILE* out;
+	if(strcmp(type, "ERROR") == 0) {
+		out = stderr;
+	} else if(strcmp(type, "LOG") == 0) {
+		out = stdout;
+	} else {
+		fprintf(stderr, "DEBUG -- INVALID LOG TYPE: %s\nDEBUG -- Exiting...\n",type);
+		exit(EXIT_FAILURE);
+	}
+
+	char* msgln = strtok((char*) msg, "\n");
+	while(msgln) {
+		fprintf(out, "%s [%s]: %s\n", type, timebuf, msgln);
+		msgln = strtok(NULL, "\n");
+	}
+}
+
+void cleanup_exit(int res) {
+	VERBOSE log("cleaning up...");
+	
+	close(listen_sd);
+
+	VERBOSE log("giving every thread chance to terminate gracefully...");
+
+	int semv;
+	thrmgmt_waitall(&semv);
+	if((uint32) semv < n_threads) {
+		rcvtos <<= 1;
+		char buf[256] = { 0 };
+		snprintf(buf, 256, "waiting %d seconds before ending cleanup procedure...", rcvtos);
+		log(buf);
+		sleep(rcvtos);
+	}
+
+	thrmgmt_finish();
+
+	for(unsigned i = 0; i < rows; ++i) {
+		malloc_free(free_seats[i]);
+	}
+
+	malloc_free(free_seats);
+
+	VERBOSE log("bye");
+	exit(res);
+}
+
+void print_usage_exit(const char* first) {
+	fprintf(stderr, "usage: %s [-v | --verbose] [-t th | --nthreads th] [-o to | --recvto to]"
+			" [-l po| --port po] [-r nr | --rows nr] [-p np | --pols np]\n", first);
+	exit(EXIT_FAILURE);
+}
+
+int get_new_listening_socket(ushort16 port) {
+	int sd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if(sd < 0) {
+		VERBOSE strerror_log("socket");
+		return -1;
+	}
+
+	struct sockaddr_in addr = { 0 };
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = INADDR_ANY;
+	addr.sin_port = htons(port);
+
+	int ret = bind(sd, (struct sockaddr*) &addr, sizeof(struct sockaddr_in));
+	if(ret < 0) {
+		VERBOSE strerror_log("bind");
+		return -1;
+	}
+
+	int val = 1;
+	if(setsockopt(sd, SOL_SOCKET, SO_REUSEADDR, (void*)&val, sizeof(int)) < 0) {
+		VERBOSE strerror_log("setsockopt");
+		return -1;
+	}
+
+	if(listen(sd, 0) < 0) {
+		VERBOSE strerror_log("listen");
+		return -1;
+	}
+
+	return sd;
+}
+
+void sigrcv(int sig) {
+	((void)sig);
+	cleanup_exit(EXIT_SUCCESS);
+}
+
+//end program aux functions
+
+int handle_connections() {
+	struct sockaddr_in addr = { 0 };
+	socklen_t len = sizeof(struct sockaddr_in);
+
+	int client_sd;
+	while((client_sd = accept(listen_sd, (struct sockaddr*) &addr, &len)) > 0) {
+		VERBOSE {
+			char buf[256] = { 0 };
+			snprintf(buf, 256, "accepted connection from %s:%d", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
+			log(buf);
+		}
+
+		struct timeval tv;
+		tv.tv_sec = rcvtos;
+		tv.tv_usec = 0;
+
+		if(setsockopt(client_sd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(struct timeval)) == 0) {
+			int rv;
+			while((rv = thrmgmt_dispatch_work(request_handler, (void*) client_sd)) == THRMGMT_DISPATCH_WORK_RETRY) {
+				log("failed to dispatch \"work\", retrying");
+			}
+
+			thrmgmt_strerror_loge_exit(rv);
+		} else
+			strerror_log("setsockopt(SO_RCVTIMEO)");
+	}
+
+	if(client_sd < 0) {
+		VERBOSE strerror_log("accept");
+		loge("error on accepting connections");
+		return EXIT_FAILURE;
+	}
+
+	//will never be reached, if handle_connection() returns, it means that accept() failed
+	return EXIT_SUCCESS;
+}
+
+int main(int argc, char** argv) {
+	ushort16 use_port = DEFAULT_PORT;
+
+	for(int i = 0; i < argc; ++i) {
+		if(arg(argv[i], "--rows", "-r")) {
+			ulong64 r;
+			get_ullong_value_for_option(argv, &r, i);
+			rows = (uint32) r;
+
+		} else if(arg(argv[i], "--pols", "-p")) {
+			ulong64 p;
+			get_ullong_value_for_option(argv, &p, i);
+			pols = (uint32) p;
+
+		} else if(arg(argv[i], "--port", "-l")) {
+			ulong64 l;
+			get_ullong_value_for_option(argv, &l, i);
+			use_port = (ushort16) l;
+
+		} else if(arg(argv[i], "--recvto", "-o")) {
+			ulong64 o;
+			get_ullong_value_for_option(argv, &o, i);
+			rcvtos = (uint32) o;
+
+		} else if(arg(argv[i], "--verbose", "-v")) {
+			__verbose__ = 1;
+
+		} else if(arg(argv[i], "--nthreads", "-t")) {
+			ulong64 t;
+			get_ullong_value_for_option(argv, &t, i);
+			n_threads = (uint32) t;
+
+		} else {
+			if(i > 0)
+				printf("ignoring unrecognized option: %s\n", argv[i]);
+
+		}
+	}
+
+	if(rows == 0 || pols == 0 || rcvtos == 0 || n_threads == 0) {
+		print_usage_exit(argv[0]);
+	}
+
+#ifdef PRINT_VALUES
+	VERBOSE { 
+		char buf[256] = { 0 };
+		snprintf(buf, sizeof(buf), "verbose = true, rows = %d, pols = %d, use_port = %d, n_threads = %d, rcvtos = %d", 
+				rows, pols, use_port, n_threads, rcvtos);
+		log(buf);
+	}
+#endif
+
+	VERBOSE log("starting setup...");
+
+	sigset_t blocked_signals;
+	sigfillset(&blocked_signals);
+	if(sigprocmask(SIG_BLOCK, &blocked_signals, NULL) < 0) {
+		strerror_log("sigprocmask(SIG_BLOCK)");
+		exit(EXIT_FAILURE);
+	}
+
+	VERBOSE log("blocked signals");
+
+	listen_sd = get_new_listening_socket(use_port);
+	if(listen_sd == -1) {
+		loge("unable to create new listening socket");
+		exit(EXIT_FAILURE);
+	}
+
+	free_seats = (ubyte**) calloc(rows, sizeof(ubyte*));
+	malloc_check_exit_on_error(free_seats);
+
+	for(unsigned i = 0; i < rows; ++i) {
+		free_seats[i] = (ubyte*) calloc(pols, sizeof(ubyte));
+		malloc_check_exit_on_error(free_seats[i]);
+	}
+
+	int thr_init_res = thrmgmt_init(n_threads);
+	thrmgmt_strerror_loge_exit(thr_init_res);
+	
+	VERBOSE log("thrmgmt initialization done");
+
+	signal(SIGINT, cleanup_exit);
+	signal(SIGTERM, cleanup_exit);
+
+	if(sigprocmask(SIG_UNBLOCK, &blocked_signals, NULL) < 0) {
+		strerror_log("sigprocmask(SIG_UNBLOCK)");
+		exit(EXIT_FAILURE);
+	}
+
+	VERBOSE log("unblocked signals");
+
+	rcvmaxbuf = 12 + (20 * rows * pols);
+
+	VERBOSE {
+		char buf[256] = { 0 };
+		snprintf(buf, 256, 
+				"max receive buffer size: %dB\n"
+				"receive timeout: %ds\n"
+				"listening on port %d\n"
+				"setup done, waiting for connections...", 
+				rcvmaxbuf, rcvtos, use_port);
+		log(buf);
+	}
+	
+	//cleanup_exit will never be reached at this point, unless accept() fails
+	cleanup_exit(handle_connections()); 
+}
+
+#define NOT_FOUND -1
+
+int64 detect_request_termination(const char* req, uint32 len) {
+	for(uint32 i = 0; i < len - 1; ++i) {
+		uint32 i_plus_one = i + 1;
+		if(req[i] == '\r' && req[i_plus_one] == '\n')
+			return i_plus_one; //found terminator
+	}
+
+	return NOT_FOUND;
+}
+
+svcop_handler_fpt request_parsereq(const char* reqstr, uint32 end, char **out_argstrt_ptr) {
+	*out_argstrt_ptr = NULL;
+
+	for(int i = 0; i < NOPS; ++i) {
+		if(strncmp(reqstr, g_op_listing[i].name, g_op_listing[i].len) == 0) {
+			if(g_op_listing[i].has_arg) {
+				if(end == g_op_listing[i].len + 1)
+					return NULL;
+
+				*out_argstrt_ptr = (char*) reqstr + g_op_listing[i].len;
+			}
+
+			return g_op_listing[i].handler; //OK
+		}
+	}
+
+	return NULL; //NOT FOUND
+}
+
+/* Formato generale
+ *   OpArgument\r\n
+ *
+ * Op                     | Argument                                        | ServerAnswer
+ * +----------------------------------------------------------------------------------------------------------------------------------------------+
+ * GetAvailableSeats       NONE (eventually ignored)                          COORD1XCOORD1YCOORD2XCOORD2Y...\r\n
+ * BookSeats               COORD1XCOORD1YCOORD2XCOORD2Y... (multiplo di 2)	  CODE\r\n **OR** Error\tna COORD1XCOORD1Y...\r\n
+ * RevokeBooking		   SERVER-PROVIDED                        Success\r\n **OR** Error\tnf\r\n
+ *
+ */
+void request_handler(void* _sd) {
+	int sd = (int) _sd;
+
+	char *request = (char*) calloc(rcvmaxbuf, sizeof(char));
+	malloc_check_exit_on_error(request);
+
+	//unbuffered, per comodità, non garantisce le prestazioni migliori, potranno esserci al più rcvmaxbuf cicli
+	int termpos = NOT_FOUND;
+	uint32 i = 0;
+	int err = 0;
+intr_retry:
+	while((err = recv(sd, request + i, 1, 0)) > 0 && i < rcvmaxbuf) {
+		if((termpos = detect_request_termination(request, rcvmaxbuf)) > NOT_FOUND)
+			break;
+
+		++i;
+	}
+
+	if(errno == EINTR)
+		goto intr_retry;
+	else if(errno) {
+		strerror_log("recv");
+		goto request_finish;
+	} else if(err == 0) {
+		log("client suddenly closed connection (before detecting terminator, filling whole buffer size)");
+		goto request_finish;
+	}
+	
+	if(termpos == NOT_FOUND) {
+
+/* --- send --- */	
+intr1_retry:
+		if(send(sd, "op:invalid\r\n\0", sizeof("op:invalid\r\n\0"), MSG_NOSIGNAL) < 0) {
+			if (errno == EINTR)
+				goto intr1_retry;
+			else
+				strerror_log("send");
+		}
+/* --- send --- */
+		
+		log("unable to find terminator, malformed request (exceeding receive buffer size)");
+		goto request_finish;
+	}
+
+	char* arg_starts_from_ptr = NULL;
+	svcop_handler_fpt target_op = request_parsereq(request, termpos, &arg_starts_from_ptr);
+	
+	if(target_op == NULL) {
+		
+/* --- send --- */	
+intr2_retry:
+		if(send(sd, "op:invalid\r\n\0", sizeof("op:invalid\r\n\0"), MSG_NOSIGNAL) < 0) {
+			if (errno == EINTR)
+				goto intr2_retry;
+			else
+				strerror_log("send");
+		}
+/* --- send --- */
+		
+		goto request_finish;
+	}
+
+	char* ans = target_op(arg_starts_from_ptr, request + termpos);
+/* --- send --- */
+intr3_retry:
+	if(send(sd, ans, strlen(ans) + 1, MSG_NOSIGNAL) < 0) {
+		if (errno == EINTR)
+			goto intr3_retry;
+		else
+			strerror_log("send");
+	}
+/* --- send --- */
+
+	malloc_free(ans);
+	
+request_finish: 
+	close(sd);
+	malloc_free(request);
+}
+
+char* op_get_available_seats(const char* __unused_1__, const char* __unused_2__) {
+	(void)__unused_1__;
+	(void)__unused_2__;
+
+	char* mem = (char*) malloc(3);
+	mem[0] = 'o';
+	mem[1] = 'k';
+	mem[2] = 0;
+
+	return mem;
+}
+
+char* op_book_seats(const char* arg, const char* endat) {
+	char* mem = (char*) malloc(3);
+	mem[0] = 'o';
+	mem[1] = 'k';
+	mem[2] = 0;
+
+	for(char* s = arg; s < endat - 1; ++s) {
+		putchar(*s);
+	}
+
+	printf("start from: %p, end to: %p\n",arg, endat - 1);
+	return mem;
+}
+
+char* op_revoke_booking(const char* arg, const char* endat) {
+	char* mem = (char*) malloc(3);
+	mem[0] = 'o';
+	mem[1] = 'k';
+	mem[2] = 0;
+	for(char* s = arg; s < endat - 1; ++s) {
+		putchar(*s);
+	}
+
+	printf("start from: %p, end to: %p\n",arg, endat - 1);
+	
+	return mem;
+}
+

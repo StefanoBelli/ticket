@@ -1,8 +1,8 @@
 FLAGS = -W -Wall -Wextra
 
 all:
-	gcc -o server server.c $(FLAGS)
-	gcc -o client client.c $(FLAGS)
+	gcc -DPRINT_VALUES -o tktsrv server/server.c server/thrmgmt.c -pthread $(FLAGS)
+	gcc -o tktcli client.c $(FLAGS)
 
 clean:
-	rm -rfv server client
+	rm -rfv tktsrv tktcli
