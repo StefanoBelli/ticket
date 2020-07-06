@@ -449,7 +449,7 @@ intr_retry:
 		strerror_log("recv");
 		goto request_finish;
 	} else if(err == 0) {
-		log("client suddenly closed connection (before detecting terminator, filling whole buffer size)");
+		VERBOSE log("client suddenly closed connection (before detecting terminator, filling whole buffer size)");
 		goto request_finish;
 	}
 	
@@ -457,7 +457,7 @@ intr_retry:
 
 /* --- send --- */	
 intr1_retry:
-		if(send(sd, "op:invalid\r\n\0", sizeof("op:invalid\r\n\0"), MSG_NOSIGNAL) < 0) {
+		if(send(sd, "op:invalid\r\n\0", sizeof("op:invalid\r\n"), MSG_NOSIGNAL) < 0) {
 			if (errno == EINTR)
 				goto intr1_retry;
 			else
@@ -465,7 +465,6 @@ intr1_retry:
 		}
 /* --- send --- */
 		
-		log("unable to find terminator, malformed request (exceeding receive buffer size)");
 		goto request_finish;
 	}
 
@@ -476,7 +475,7 @@ intr1_retry:
 		
 /* --- send --- */	
 intr2_retry:
-		if(send(sd, "op:invalid\r\n\0", sizeof("op:invalid\r\n\0"), MSG_NOSIGNAL) < 0) {
+		if(send(sd, "op:invalid\r\n\0", sizeof("op:invalid\r\n"), MSG_NOSIGNAL) < 0) {
 			if (errno == EINTR)
 				goto intr2_retry;
 			else
