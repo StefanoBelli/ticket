@@ -431,28 +431,25 @@ void request_handler(void* _sd) {
 	char *request = (char*) calloc(rcvmaxbuf, sizeof(char));
 	malloc_check_exit_on_error(request);
 
-	//unbuffered, per comodità, non garantisce le prestazioni migliori, potranno esserci al più rcvmaxbuf cicli
 	int termpos = NOT_FOUND;
-	uint32 i = 0;
+
 	int err = 0;
 intr_retry:
-	while((err = recv(sd, request + i, 1, 0)) > 0 && i < rcvmaxbuf) {
-		if((termpos = detect_request_termination(request, rcvmaxbuf)) > NOT_FOUND)
-			break;
-
-		++i;
-	}
-
-	if(errno == EINTR)
-		goto intr_retry;
-	else if(errno) {
-		strerror_log("recv");
-		goto request_finish;
+	err = recv(sd, request, rcvmaxbuf, 0);
+	if(err < 0) {
+		if(errno == EINTR)
+			goto intr_retry;
+		else if(errno) {
+			if(errno != EWOULDBLOCK)
+				strerror_log("recv");
+			goto request_finish;
+		}
 	} else if(err == 0) {
-		VERBOSE log("client suddenly closed connection (before detecting terminator, filling whole buffer size)");
+		VERBOSE log("client suddenly closed connection");
 		goto request_finish;
 	}
-	
+
+	termpos = detect_request_termination(request, err);
 	if(termpos == NOT_FOUND) {
 
 /* --- send --- */	
