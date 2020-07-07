@@ -92,16 +92,16 @@ typedef long long int64;
 typedef char* (*svcop_handler_fpt)(const char*, const char*);
 
 typedef struct {
-	int x;
-	int y;
-} pair;
-
-typedef struct {
 	char* name;
 	ubyte has_arg;
 	svcop_handler_fpt handler;
 	uint32 len;
 } svcop;
+
+typedef struct {
+	ubyte booked;
+	time_t unique_code;
+} seat;
 
 typedef struct {
 	ubyte __verbose__;
@@ -120,7 +120,7 @@ char* op_revoke_booking(const char*, const char*);
 
 //global variables
 
-ubyte** seats = NULL;
+seat** g_seats = NULL;
 
 program_instance_config g_conf = 
 { 0, 0, 0, DEFAULT_THREADS, DEFAULT_RCVTO, 0, 0 };
@@ -192,10 +192,10 @@ void cleanup_exit(int res) {
 	thrmgmt_finish();
 
 	for(unsigned i = 0; i < conf(rows); ++i) {
-		malloc_free(seats[i]);
+		malloc_free(g_seats[i]);
 	}
 
-	malloc_free(seats);
+	malloc_free(g_seats);
 
 	VERBOSE log("bye");
 	exit(res);
@@ -352,12 +352,12 @@ int main(int argc, char** argv) {
 		exit(EXIT_FAILURE);
 	}
 
-	seats = (ubyte**) calloc(conf(rows), sizeof(ubyte*));
-	malloc_check_exit_on_error(seats);
+	g_seats = (seat**) calloc(conf(rows), sizeof(seat*));
+	malloc_check_exit_on_error(g_seats);
 
 	for(unsigned i = 0; i < conf(rows); ++i) {
-		seats[i] = (ubyte*) calloc(conf(pols), sizeof(ubyte));
-		malloc_check_exit_on_error(seats[i]);
+		g_seats[i] = (seat*) calloc(conf(pols), sizeof(seat));
+		malloc_check_exit_on_error(g_seats[i]);
 	}
 
 	int thr_init_res = thrmgmt_init(conf(n_threads));
