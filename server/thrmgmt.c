@@ -35,6 +35,7 @@ static void* __thrmgmt_internal_routine(void* _args) {
 	__thrmgmt_args *args = (__thrmgmt_args*) _args;
 	args->perform_work(args->user_args);
 
+	malloc_free(args);
 	sem_post(&sem_running_threads);
 	
 	return NULL; 

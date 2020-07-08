@@ -15,7 +15,7 @@
 #include "malloc_utils.h"
 
 #ifndef DATETIME_FORMAT
-#define DATETIME_FORMAT "%Y/%M/%d %H:%m:%S"
+#define DATETIME_FORMAT "%Y/%m/%d %H:%M:%S"
 #endif
 
 #ifndef DEFAULT_PORT
@@ -100,16 +100,18 @@ typedef struct {
 
 typedef struct {
 	ubyte booked;
-	time_t unique_code;
+	uint32 unique_code;
 } seat;
 
 typedef struct {
 	ubyte __verbose__;
 	uint32 rows;
 	uint32 pols;
+	uint32 n_total_seats;
 	uint32 n_threads; //default threads
 	uint32 rcvtos; //default rcvtos
 	uint32 rcvmaxbuf;
+	uint32 sndavailseatbuf;
 	int listen_sd;
 } program_instance_config;
 
@@ -123,7 +125,7 @@ char* op_revoke_booking(const char*, const char*);
 seat** g_seats = NULL;
 
 program_instance_config g_conf = 
-{ 0, 0, 0, DEFAULT_THREADS, DEFAULT_RCVTO, 0, 0 };
+{ 0, 0, 0, 0, DEFAULT_THREADS, DEFAULT_RCVTO, 0, 0, 0 };
 
 #define NOPS 3
 const svcop g_op_listing[NOPS] = 
@@ -134,6 +136,27 @@ const svcop g_op_listing[NOPS] =
 };
 
 // program aux functions
+//
+int dgt(uint32 j) {
+	int i = 0;
+
+	while (j) {
+		j /= 10;
+		i++;
+	}
+
+	return i;
+}
+
+int itos(uint32 n, char* out) {
+	int slen = dgt(n);
+	for (int i = slen - 1; n; --i) {
+		out[i] = (n % 10) + 48;
+		n /= 10;
+	}
+
+	return slen;
+}
 
 //int stoull(__in const char*, __out ulong64*);
 // returns 0 on success, 1 on failure
@@ -375,19 +398,42 @@ int main(int argc, char** argv) {
 
 	VERBOSE log("unblocked signals");
 
-	conf(rcvmaxbuf) = 12 + (20 * conf(rows) * conf(pols));
+
+	/* ITA: buffer più grandi
+	 * (recv) BookSeatsx1,x2,y1,y2,z1,z2,...,k1,k2\r\n
+	 * (send) x1,x2,y1,y2,z1,z2,...,k1,k2\0
+	 * 
+	 * rcvmaxbuf:
+	 *  9 = len("BookSeats")
+	 *  2 = len("\r\n")
+	 *  20 * n_total_seats = 2 * 10 * n_total_seats = 2 * len(32_bit_integer) * n_total_seats
+	 *  n_total_seats * 2 - 1 = # di virgole necessarie
+	 *
+	 * sndavailseatbuf:
+	 *    rcvmaxbuf - 10 = non abbiamo 9 + 2: len("BookSeats") + len("\r\n"), ma dobbiamo inviare
+	 *    il terminatore '\0', è quindi equivalente a rcvmaxbuf - 11 + 1
+	 *  
+	 *  E' conveniente fare cosi perchè il buffer è fisso, niente realloc(s), una sola recv.
+	 *  E' inverosimile che una sala cinema abbia talmente tanti posti tali da ottenere buffer
+	 *  enormi.
+	 */
+
+	conf(n_total_seats) = conf(rows) * conf(pols);
+	conf(rcvmaxbuf) = 11 + (20 * conf(n_total_seats)) + ((conf(n_total_seats) << 1) - 1);
+	conf(sndavailseatbuf) = conf(rcvmaxbuf) - 10;
 
 	VERBOSE {
 		char buf[256] = { 0 };
 		snprintf(buf, 256, 
 				"max receive buffer size: %dB\n"
+				"max command GetAvailableSeats send buffer size: %dB\n"
 				"receive timeout: %ds\n"
 				"listening on port %d\n"
 				"setup done, waiting for connections...", 
-				conf(rcvmaxbuf), conf(rcvtos), use_port);
+				conf(rcvmaxbuf), conf(sndavailseatbuf), conf(rcvtos), use_port);
 		log(buf);
 	}
-	
+
 	//cleanup_exit will never be reached at this point, unless accept() fails
 	cleanup_exit(handle_connections()); 
 }
@@ -454,7 +500,7 @@ intr_retry:
 
 /* --- send --- */	
 intr1_retry:
-		if(send(sd, "op:invalid\r\n\0", sizeof("op:invalid\r\n"), MSG_NOSIGNAL) < 0) {
+		if(send(sd, "Op:invalid\r\n\0", sizeof("Op:invalid\r\n"), MSG_NOSIGNAL) < 0) {
 			if (errno == EINTR)
 				goto intr1_retry;
 			else
@@ -472,7 +518,7 @@ intr1_retry:
 		
 /* --- send --- */	
 intr2_retry:
-		if(send(sd, "op:invalid\r\n\0", sizeof("op:invalid\r\n"), MSG_NOSIGNAL) < 0) {
+		if(send(sd, "Op:invalid\r\n\0", sizeof("Op:invalid\r\n"), MSG_NOSIGNAL) < 0) {
 			if (errno == EINTR)
 				goto intr2_retry;
 			else
@@ -483,7 +529,10 @@ intr2_retry:
 		goto request_finish;
 	}
 
-	char* ans = target_op(arg_starts_from_ptr, request + termpos);
+	char* endpos = request + termpos;
+	*(endpos - 1) = 0;
+
+	char* ans = target_op(arg_starts_from_ptr, endpos);
 /* --- send --- */
 intr3_retry:
 	if(send(sd, ans, strlen(ans) + 1, MSG_NOSIGNAL) < 0) {
@@ -505,12 +554,117 @@ char* op_get_available_seats(const char* __unused_1__, const char* __unused_2__)
 	(void)__unused_1__;
 	(void)__unused_2__;
 
-	return NULL;
+	char comma = ',';
+
+	char* res = (char*) calloc(conf(sndavailseatbuf), sizeof(char));
+	malloc_check_exit_on_error(res);
+
+	uint32 len = 0;
+
+	for(uint32 i = 0; i < conf(rows); ++i) {
+		char sip1[11] = { 0 };
+		int sip1_len = itos(i + 1, sip1);
+
+		for(uint32 j = 0; j < conf(pols); ++j) {
+			ubyte is_booked = g_seats[i][j].booked;
+
+			if(is_booked == 0) {
+				char sjp1[11] = { 0 };
+				int sjp1_len = itos(j + 1, sjp1);
+
+				strncat(res, sip1, sip1_len);
+				strncat(res, &comma, 1);
+				strncat(res, sjp1, sjp1_len);
+				strncat(res, &comma, 1);
+
+				len += 2 + sip1_len + sjp1_len;
+			}
+		}
+	}
+
+	if(len > 0)
+		res[len - 1] = 0;
+
+	return res;
 }
 
+#define book_seats_error(msg, msglen) { \
+		malloc_free(to_book); \
+		char* err = (char*) malloc(sizeof(char) * msglen); \
+		malloc_check_exit_on_error(err); \
+		memcpy(err, msg, msglen); \
+		return err; } 
+		
 char* op_book_seats(const char* arg, const char* endat) {
-	return NULL;
+	uint32 n_compo = 0;
+
+	uint32 n_bookings = 0;
+	seat** to_book = (seat**) malloc(sizeof(seat*) * 1);
+	malloc_check_exit_on_error(to_book);
+
+	char* tok = strtok((char*)arg, ",");
+	while(tok && tok < endat) {
+		++n_compo;
+
+		if(n_compo % 2 == 1) {
+			char* prevtok = tok;
+			tok = strtok(NULL, ",");
+			
+			if(tok == NULL)
+				book_seats_error("Fail:noteven", 13);
+
+			uint32 x;
+			uint32 y;
+			
+			int res1, res2;
+			if((res1 = stoull(prevtok, (ulong64*) &x)) || (res2 = stoull(tok, (ulong64*) &y)) || 
+					x == 0 || y == 0 || x > conf(rows) || y > conf(pols))
+				book_seats_error("Fail:exceed", 12);
+
+			if(n_bookings + 1 > conf(n_total_seats))
+				book_seats_error("Fail:toomuch", 13);
+
+			to_book[n_bookings] = &g_seats[x - 1][y - 1];
+			++n_bookings;
+			
+			to_book = (seat**) realloc(to_book, sizeof(seat*) * (n_bookings + 1));
+			malloc_check_exit_on_error(to_book);
+		}
+
+		tok = strtok(NULL, ",");
+	}
+
+	if(n_bookings == 0)
+		book_seats_error("Fail:wholeempty", 16);
+
+	for(uint32 i = 0; i < n_bookings; ++i) {
+		if(to_book[i]->booked == 1)
+			book_seats_error("Fail:notavail", 14);
+	}
+
+	uint32 unique = (uint32) time(NULL);
+
+	for(uint32 i = 0; i < n_bookings; ++i) {
+		to_book[i]->booked = 1;
+		to_book[i]->unique_code = unique;
+	}
+
+	malloc_free(to_book);
+
+	char code[11] = { 0 };
+	uint32 code_len = itos(unique, code);
+
+	int len = code_len + 9;
+	char* res = (char*) malloc(sizeof(char) * len);
+	malloc_check_exit_on_error(res);
+	memcpy(res, "Success:", 8);
+	memcpy(res + 8, code, code_len);
+	res[len - 1] = 0;
+
+	return res;
 }
+
+#undef book_seats_error
 
 char* op_revoke_booking(const char* arg, const char* endat) {
 	return NULL;
