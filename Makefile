@@ -1,7 +1,7 @@
-FLAGS = -W -Wall -Wextra
+FLAGS = -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast -W -Wall -Wextra
 
 all:
-	gcc -DPRINT_VALUES -o tktsrv server/server.c server/thrmgmt.c -pthread $(FLAGS)
+	gcc -DPOSIX_VERSION -o tktsrv server/server.c server/thrmgmt.c -pthread $(FLAGS)
 	gcc -o tktcli client.c $(FLAGS)
 
 clean:

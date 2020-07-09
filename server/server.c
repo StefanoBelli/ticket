@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <arpa/inet.h>
+#include <pthread.h>
 
 #include "thrmgmt.h"
 #include "malloc_utils.h"
@@ -83,7 +84,8 @@
 #define conf(prop) (g_conf.prop)
 
 //typedefs and prototypes
-
+//
+typedef pthread_mutex_t system_mutex;
 typedef unsigned long long ulong64;
 typedef unsigned int uint32;
 typedef unsigned char ubyte;
@@ -121,6 +123,7 @@ char* op_book_seats(const char*, const char*);
 char* op_revoke_booking(const char*, const char*);
 
 //global variables
+system_mutex g_booking_mtx;
 
 seat** g_seats = NULL;
 
@@ -213,6 +216,8 @@ void cleanup_exit(int res) {
 	}
 
 	thrmgmt_finish();
+
+	thrmgmt_mutex_destroy(&g_booking_mtx);
 
 	for(unsigned i = 0; i < conf(rows); ++i) {
 		malloc_free(g_seats[i]);
@@ -385,7 +390,9 @@ int main(int argc, char** argv) {
 
 	int thr_init_res = thrmgmt_init(conf(n_threads));
 	thrmgmt_strerror_loge_exit(thr_init_res);
-	
+
+	thrmgmt_mutex_init(&g_booking_mtx);
+
 	VERBOSE log("thrmgmt initialization done");
 
 	signal(SIGINT, cleanup_exit);
@@ -550,6 +557,12 @@ request_finish:
 	malloc_free(request);
 }
 
+#define __locked__() \
+	(thrmgmt_strerror_loge_exit(thrmgmt_mutex_lock(&g_booking_mtx)))
+
+#define __unlocked__() \
+	(thrmgmt_strerror_loge_exit(thrmgmt_mutex_unlock(&g_booking_mtx)))
+
 char* op_get_available_seats(const char* __unused_1__, const char* __unused_2__) {
 	(void)__unused_1__;
 	(void)__unused_2__;
@@ -566,7 +579,9 @@ char* op_get_available_seats(const char* __unused_1__, const char* __unused_2__)
 		int sip1_len = itos(i + 1, sip1);
 
 		for(uint32 j = 0; j < conf(pols); ++j) {
+			__locked__();
 			ubyte is_booked = g_seats[i][j].booked;
+			__unlocked__();
 
 			if(is_booked == 0) {
 				char sjp1[11] = { 0 };
@@ -639,10 +654,10 @@ char* op_book_seats(const char* arg, const char* endat) {
 	if(n_bookings == 0)
 		book_seats_error("Fail:wholeempty", 16);
 
+	__locked__();
+	
 	for(uint32 i = 0; i < n_bookings; ++i) {
-		//LOCK CRIT SECTION
 		ubyte is_booked = to_book[i]->booked;
-		//UNLOCK CRIT SECTION
 
 		if(is_booked == 1)
 			book_seats_error("Fail:notavail", 14);
@@ -651,11 +666,11 @@ char* op_book_seats(const char* arg, const char* endat) {
 	uint32 unique = (uint32) time(NULL);
 
 	for(uint32 i = 0; i < n_bookings; ++i) {
-		//LOCK CRIT SECTION
 		to_book[i]->booked = 1;
-		//UNLOCK CRIT SECTION
 		to_book[i]->unique_code = unique;
 	}
+	
+	__unlocked__();
 
 	malloc_free(to_book);
 
@@ -692,15 +707,16 @@ char* op_revoke_booking(const char* arg, const char* __unused_1__) {
 	for(uint32 i = 0; i < conf(rows); ++i) {
 		for(uint32 j = 0; j < conf(pols); ++j) {
 
-			//LOCK CRIT SECTION
+			__locked__();
 			ubyte is_booked = g_seats[i][j].booked;
-			//UNLOCK CRIT SECTION
+			__unlocked__();
 
 			if(is_booked && g_seats[i][j].unique_code == unique) {
 				unique_code_found = 1;
-				//LOCK CRIT SECTION
+
+				__locked__();
 				g_seats[i][j].booked = 0;
-				//UNLOCK CRIT SECTION
+				__unlocked__();
 			}
 		}
 	}
@@ -712,3 +728,5 @@ char* op_revoke_booking(const char* arg, const char* __unused_1__) {
 }
 
 #undef revoke_booking_error
+#undef __locked__
+#undef __unlocked__
