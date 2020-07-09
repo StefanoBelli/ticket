@@ -136,7 +136,7 @@ const svcop g_op_listing[NOPS] =
 };
 
 // program aux functions
-//
+
 int dgt(uint32 j) {
 	int i = 0;
 
@@ -554,7 +554,7 @@ char* op_get_available_seats(const char* __unused_1__, const char* __unused_2__)
 	(void)__unused_1__;
 	(void)__unused_2__;
 
-	char comma = ',';
+	const char comma = ',';
 
 	char* res = (char*) calloc(conf(sndavailseatbuf), sizeof(char));
 	malloc_check_exit_on_error(res);
@@ -588,12 +588,14 @@ char* op_get_available_seats(const char* __unused_1__, const char* __unused_2__)
 	return res;
 }
 
-#define book_seats_error(msg, msglen) { \
+#define book_seats_error(msg, msglen) \
+{ \
 		malloc_free(to_book); \
 		char* err = (char*) malloc(sizeof(char) * msglen); \
 		malloc_check_exit_on_error(err); \
 		memcpy(err, msg, msglen); \
-		return err; } 
+		return err; \
+} 
 		
 char* op_book_seats(const char* arg, const char* endat) {
 	uint32 n_compo = 0;
@@ -638,14 +640,20 @@ char* op_book_seats(const char* arg, const char* endat) {
 		book_seats_error("Fail:wholeempty", 16);
 
 	for(uint32 i = 0; i < n_bookings; ++i) {
-		if(to_book[i]->booked == 1)
+		//LOCK CRIT SECTION
+		ubyte is_booked = to_book[i]->booked;
+		//UNLOCK CRIT SECTION
+
+		if(is_booked == 1)
 			book_seats_error("Fail:notavail", 14);
 	}
 
 	uint32 unique = (uint32) time(NULL);
 
 	for(uint32 i = 0; i < n_bookings; ++i) {
+		//LOCK CRIT SECTION
 		to_book[i]->booked = 1;
+		//UNLOCK CRIT SECTION
 		to_book[i]->unique_code = unique;
 	}
 
@@ -666,7 +674,41 @@ char* op_book_seats(const char* arg, const char* endat) {
 
 #undef book_seats_error
 
-char* op_revoke_booking(const char* arg, const char* endat) {
-	return NULL;
+#define revoke_booking_result(msg, len) \
+{ \
+	char* err = (char*) malloc(sizeof(char) * len); \
+	memcpy(err, msg, len); \
+	return err; \
 }
 
+char* op_revoke_booking(const char* arg, const char* __unused_1__) {
+	((void)__unused_1__);
+
+	uint32 unique;
+	if(stoull(arg, (ulong64*) &unique))
+		revoke_booking_result("Fail:nan\0", 9);
+
+	int unique_code_found = 0;
+	for(uint32 i = 0; i < conf(rows); ++i) {
+		for(uint32 j = 0; j < conf(pols); ++j) {
+
+			//LOCK CRIT SECTION
+			ubyte is_booked = g_seats[i][j].booked;
+			//UNLOCK CRIT SECTION
+
+			if(is_booked && g_seats[i][j].unique_code == unique) {
+				unique_code_found = 1;
+				//LOCK CRIT SECTION
+				g_seats[i][j].booked = 0;
+				//UNLOCK CRIT SECTION
+			}
+		}
+	}
+	
+	if(unique_code_found == 0)
+		revoke_booking_result("Fail:nounique\0", 14);
+
+	revoke_booking_result("Success:ok\0", 11);
+}
+
+#undef revoke_booking_error
