@@ -70,8 +70,8 @@
 #define get_ullong_value_for_option(arg_array, out_value_ptr, arg_cur_idx) \
 { \
 	int next_idx; \
-	value_check(next_idx, i, argv[i]); \
-	stoull_exit(argv[next_idx], out_value_ptr); \
+	value_check(next_idx, i, arg_array[i]); \
+	stoull_exit(arg_array[next_idx], out_value_ptr); \
 	++arg_cur_idx; \
 }
 
@@ -557,12 +557,6 @@ request_finish:
 	malloc_free(request);
 }
 
-#define __locked__() \
-	(thrmgmt_strerror_loge_exit(thrmgmt_mutex_lock(&g_booking_mtx)))
-
-#define __unlocked__() \
-	(thrmgmt_strerror_loge_exit(thrmgmt_mutex_unlock(&g_booking_mtx)))
-
 char* op_get_available_seats(const char* __unused_1__, const char* __unused_2__) {
 	(void)__unused_1__;
 	(void)__unused_2__;
@@ -579,9 +573,7 @@ char* op_get_available_seats(const char* __unused_1__, const char* __unused_2__)
 		int sip1_len = itos(i + 1, sip1);
 
 		for(uint32 j = 0; j < conf(pols); ++j) {
-			__locked__();
 			ubyte is_booked = g_seats[i][j].booked;
-			__unlocked__();
 
 			if(is_booked == 0) {
 				char sjp1[11] = { 0 };
@@ -611,7 +603,13 @@ char* op_get_available_seats(const char* __unused_1__, const char* __unused_2__)
 		memcpy(err, msg, msglen); \
 		return err; \
 } 
-		
+
+#define __locked__() \
+	(thrmgmt_strerror_loge_exit(thrmgmt_mutex_lock(&g_booking_mtx)))
+
+#define __unlocked__() \
+	(thrmgmt_strerror_loge_exit(thrmgmt_mutex_unlock(&g_booking_mtx)))
+
 char* op_book_seats(const char* arg, const char* endat) {
 	uint32 n_compo = 0;
 
@@ -659,15 +657,17 @@ char* op_book_seats(const char* arg, const char* endat) {
 	for(uint32 i = 0; i < n_bookings; ++i) {
 		ubyte is_booked = to_book[i]->booked;
 
-		if(is_booked == 1)
+		if(is_booked == 1) {
+			__unlocked__();
 			book_seats_error("Fail:notavail", 14);
+		}
 	}
 
 	uint32 unique = (uint32) time(NULL);
 
 	for(uint32 i = 0; i < n_bookings; ++i) {
-		to_book[i]->booked = 1;
 		to_book[i]->unique_code = unique;
+		to_book[i]->booked = 1;
 	}
 	
 	__unlocked__();
@@ -688,6 +688,8 @@ char* op_book_seats(const char* arg, const char* endat) {
 }
 
 #undef book_seats_error
+#undef __locked__
+#undef __unlocked__
 
 #define revoke_booking_result(msg, len) \
 { \
@@ -706,17 +708,12 @@ char* op_revoke_booking(const char* arg, const char* __unused_1__) {
 	int unique_code_found = 0;
 	for(uint32 i = 0; i < conf(rows); ++i) {
 		for(uint32 j = 0; j < conf(pols); ++j) {
-
-			__locked__();
 			ubyte is_booked = g_seats[i][j].booked;
-			__unlocked__();
 
 			if(is_booked && g_seats[i][j].unique_code == unique) {
 				unique_code_found = 1;
 
-				__locked__();
 				g_seats[i][j].booked = 0;
-				__unlocked__();
 			}
 		}
 	}
@@ -728,5 +725,3 @@ char* op_revoke_booking(const char* arg, const char* __unused_1__) {
 }
 
 #undef revoke_booking_error
-#undef __locked__
-#undef __unlocked__
