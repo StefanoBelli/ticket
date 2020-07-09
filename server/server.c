@@ -130,7 +130,7 @@ program_instance_config g_conf =
 #define NOPS 3
 const svcop g_op_listing[NOPS] = 
 {
-	{ "GetAvailableSeats", 0, (svcop_handler_fpt) op_get_available_seats, 17 },
+	{ "GetAvailableSeats", 0, op_get_available_seats, 17 },
 	{ "BookSeats", 1, op_book_seats, 9 },
 	{ "RevokeBooking", 1, op_revoke_booking, 13 }
 };

@@ -17,7 +17,14 @@
 #define THRMGMT_DISPATCH_WORK_CREATE_FAILURE 20
 #define THRMGMT_DISPATCH_WORK_RETRY 21
 
+#define THRMGMT_MUTEX_INIT_FAILURE 22
+#define THRMGMT_MUTEX_LOCK_FAILURE 23
+#define THRMGMT_MUTEX_UNLOCK_FAILURE 24
+#define THRMGMT_MUTEX_DESTROY_FAILURE 25
+
 typedef void(*work_routine_fpt)(void*);
+
+typedef void* thrmgmt_system_mutex;
 
 /* 
  * thrmgmt_init
@@ -66,6 +73,30 @@ int thrmgmt_waitall(int *semval);
  *		libera completamente le risorse allocate, ogni errore è ignorato
  */
 void thrmgmt_finish();
+
+/* 
+ * thrmgmt_mutex_init
+ *		iniziallizza il mutex
+ */
+int thrmgmt_mutex_init(thrmgmt_system_mutex mtx);
+
+/*
+ * thrmgmt_mutex_lock
+ *		lock del mutex
+ */
+int thrmgmt_mutex_lock(thrmgmt_system_mutex mtx);
+
+/*
+ * thrmgmt_mutex_unlock
+ *		unlock del mutex
+ */
+int thrmgmt_mutex_unlock(thrmgmt_system_mutex mtx);
+
+/*
+ * thrmgmt_mutex_destroy
+ *		destroy del mutex
+ */
+int thrmgmt_mutex_destroy(thrmgmt_system_mutex mtx);
 
 void thrmgmt_strerror(int error, char* dst, int dst_size);
 

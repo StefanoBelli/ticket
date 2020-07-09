@@ -115,6 +115,34 @@ void thrmgmt_finish() {
 	sem_destroy(&sem_running_threads);
 }
 
+int thrmgmt_mutex_init(thrmgmt_system_mutex mtx) {
+	if(pthread_mutex_init((pthread_mutex_t*)mtx, NULL) < 0)
+		return THRMGMT_MUTEX_INIT_FAILURE;
+	
+	return THRMGMT_OK;
+}
+
+int thrmgmt_mutex_lock(thrmgmt_system_mutex mtx) {
+	if(pthread_mutex_lock((pthread_mutex_t*)mtx) < 0)
+		return THRMGMT_MUTEX_LOCK_FAILURE;
+	
+	return THRMGMT_OK;
+}
+
+int thrmgmt_mutex_unlock(thrmgmt_system_mutex mtx) {
+	if(pthread_mutex_unlock((pthread_mutex_t*)mtx) < 0)
+		return THRMGMT_MUTEX_UNLOCK_FAILURE;
+	
+	return THRMGMT_OK;
+}
+
+int thrmgmt_mutex_destroy(thrmgmt_system_mutex mtx) {
+	if(pthread_mutex_destroy((pthread_mutex_t*)mtx) < 0)
+		return THRMGMT_MUTEX_DESTROY_FAILURE;
+	
+	return THRMGMT_OK;
+}
+
 void thrmgmt_strerror(int error, char* dst, int dst_max_size) {
 	int current_errno = errno;
 	memset(dst, 0, dst_max_size);
@@ -155,6 +183,20 @@ void thrmgmt_strerror(int error, char* dst, int dst_max_size) {
 		case THRMGMT_WAITALL_SEMREL_FAILURE: 
 			snprintf(dst, dst_max_size, "thrmgmt_waitall:sem_post: %s", strerror(current_errno));
 			break;
+		
+		case THRMGMT_MUTEX_INIT_FAILURE:
+			snprintf(dst, dst_max_size, "thrmgmt_mutex_init:pthread_mutex_init: %s",strerror(current_errno));
+			break;
+		case THRMGMT_MUTEX_LOCK_FAILURE:
+			snprintf(dst, dst_max_size, "thrmgmt_mutex_lock:pthread_mutex_lock: %s",strerror(current_errno));
+			break;
+		case THRMGMT_MUTEX_UNLOCK_FAILURE:
+			snprintf(dst, dst_max_size, "thrmgmt_mutex_unlock:pthread_mutex_unlock: %s",strerror(current_errno));
+			break;
+		case THRMGMT_MUTEX_DESTROY_FAILURE:
+			snprintf(dst, dst_max_size, "thrmgmt_mutex_destroy:pthread_mutex_destroy: %s",strerror(current_errno));
+			break;
+
 		default:
 			snprintf(dst, dst_max_size, "thrmgmt: Success");
 	}
