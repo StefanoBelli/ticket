@@ -216,9 +216,9 @@ intr_recv_retry:
 			printf("One or more of your chosen seats already booked\n");
 		else if(strcmp(error_string, "exceed") == 0)
 			printf("Exceeding in terms of # seats or coordinates\n"
-					"e.g. if we have rows=3 and pols=4 we can't have (4,5) as coordinate\n"
-					"e.g.2 if we have rows=3 * pols=4 12 total seats we can't exceed that"
-					"number of booking\n");
+					"e.g. if we have rows=3 and pols=4 we can't have (4,5) as coordinate\n");
+		else
+			printf("Malformed input or seat coordinate too large\n");
 	}
 
 	puts("\n============\n");
